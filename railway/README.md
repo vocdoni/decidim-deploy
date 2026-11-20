@@ -156,11 +156,12 @@ workspace admin can create one).
 
 ### Rolling back
 
-Run `railway/deploy-prod.sh` with the previous release's tag. Releases
-`prod-2026.11.19` and earlier live in vocdoni/decidim (`deploy/`): roll one back
-with `deploy/railway/deploy-prod.sh <tag>` from a checkout of vocdoni/decidim at
-that tag. Migrations are
-not rolled back; Postgres backups are below. If the Railway API is unavailable,
+Run `railway/deploy-prod.sh` with the previous release's tag. Images older than
+the first release here (`prod-2026.11.20`) have no release: point the services at
+one by digest with `ci/railway-promote.sh promote
+ghcr.io/vocdoni/decidim-vocdoni@sha256:<digest>`, with the `RAILWAY_*` variables
+exported as in `deploy-prod.sh`. Migrations are not rolled back; see
+[Backups](#backups). If the Railway API is unavailable,
 redeploy an earlier deployment of each service from the Railway dashboard.
 
 ## First boot
