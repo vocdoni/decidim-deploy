@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Points Railway services at one container image (by digest) and deploys them
-# in order, through Railway's public GraphQL API. Used by vocdoni_release.yml;
-# see deploy/railway/README.md, "Deploying".
+# in order, through Railway's public GraphQL API. Used by release.yml;
+# see railway/README.md, "Deploying".
 #
 # usage: railway-promote.sh check   <image@sha256:digest>
 #        railway-promote.sh promote <image@sha256:digest>

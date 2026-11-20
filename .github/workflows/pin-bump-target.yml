@@ -1,0 +1,334 @@
+# Moves one git pin in railway/Gemfile.lock to the head of its branch, called by
+# pin-bump.yml for each target:
+# - gem: decidim-elections-vocdoni, vocdoni/decidim-secure_elections main;
+# - decidim: decidim + decidim-elections, vocdoni/decidim develop.
+# See railway/README.md, "Bumping Decidim or the module".
+#
+# Two jobs, so the pinned repositories never get write access here:
+# - `lock` runs `bundle lock`, which evaluates their gemspecs (their code), in
+#   a throwaway `docker run` container with no token, and hands the lock over
+#   as an artifact.
+# - `bump` holds the write token, never runs their code, and treats the
+#   artifact as untrusted input: pin-bump-check.sh accepts it only if it differs
+#   from main's lock in exactly the target's revision line.
+# A mechanical bump is built and merged; any other opens a PR labelled
+# needs-review. While bot/<target>-bump already proposes the branch head,
+# later runs leave it alone (so fixes pushed to it by hand survive).
+name: Pin bump (target)
+
+on:
+  workflow_call:
+    inputs:
+      target:
+        description: "gem or decidim"
+        required: true
+        type: string
+
+permissions: {}
+
+jobs:
+  lock:
+    name: Lock (no token)
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions: {}
+    outputs:
+      changed: ${{ steps.pin.outputs.changed }}
+    steps:
+      - name: Resolve the target
+        id: t
+        env:
+          TARGET: ${{ inputs.target }}
+        run: |
+          set -euo pipefail
+          case $TARGET in
+            gem) echo "remote=https://github.com/vocdoni/decidim-secure_elections.git" >> "$GITHUB_OUTPUT"
+                 echo "branch=main" >> "$GITHUB_OUTPUT" ;;
+            decidim) echo "remote=https://github.com/vocdoni/decidim.git" >> "$GITHUB_OUTPUT"
+                     echo "branch=develop" >> "$GITHUB_OUTPUT" ;;
+            *) echo "::error::unknown target $TARGET"; exit 1 ;;
+          esac
+
+      # Public repositories only: plain HTTPS, no credentials, no checkout action.
+      - name: Read the pinned and the current revision
+        id: pin
+        env:
+          TARGET: ${{ inputs.target }}
+          REMOTE: ${{ steps.t.outputs.remote }}
+          BRANCH: ${{ steps.t.outputs.branch }}
+        run: |
+          set -euo pipefail
+          mkdir work
+          pinned_in() { awk -v r="  remote: $REMOTE" '$0 == r { f = 1 } f && $1 == "revision:" { print $2; exit }' "$1"; }
+          main=$(git ls-remote "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" refs/heads/main | cut -f1)
+          head=$(git ls-remote "$REMOTE" "refs/heads/$BRANCH" | cut -f1)
+          for v in "$main" "$head"; do
+            [[ "$v" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::ls-remote returned no commit"; exit 1; }
+          done
+          raw="https://raw.githubusercontent.com/$GITHUB_REPOSITORY"
+          curl -fsSL -o work/Gemfile "$raw/$main/railway/Gemfile"
+          curl -fsSL -o work/Gemfile.lock "$raw/$main/railway/Gemfile.lock"
+          pinned=$(pinned_in work/Gemfile.lock)
+          [[ "$pinned" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::cannot read the pinned revision"; exit 1; }
+          echo "main $main pins $pinned; $REMOTE $BRANCH is $head"
+          changed=true
+          if [ "$pinned" = "$head" ]; then
+            changed=false
+          else
+            bot=$(git ls-remote "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" "refs/heads/bot/$TARGET-bump" | cut -f1)
+            if [[ "$bot" =~ ^[0-9a-f]{40}$ ]] && curl -fsSL -o work/bot.lock "$raw/$bot/railway/Gemfile.lock" \
+              && [ "$(pinned_in work/bot.lock)" = "$head" ]; then
+              echo "::notice::bot/$TARGET-bump already proposes $head"
+              changed=false
+            fi
+          fi
+          echo "changed=$changed" >> "$GITHUB_OUTPUT"
+          if [ "$changed" = true ]; then
+            # Each revision is unique to its GIT block.
+            sed -i "s/^  revision: $pinned\$/  revision: $head/" work/Gemfile.lock
+          fi
+
+      - name: bundle lock
+        if: steps.pin.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          # Gemspec code runs only inside this disposable container, with no
+          # runner process to scrape for ACTIONS_RUNTIME_TOKEN. The container
+          # gets copies and returns the lock on stdout: nothing it writes (a
+          # symlink, say) is read back by the host or uploaded.
+          mkdir "$RUNNER_TEMP/in" "$RUNNER_TEMP/out"
+          cp work/Gemfile work/Gemfile.lock "$RUNNER_TEMP/in/"
+          docker run --rm -v "$RUNNER_TEMP/in:/in:ro" \
+            -e BUNDLE_FROZEN=false -e BUNDLE_DEPLOYMENT=false \
+            ruby:3.4.7@sha256:779ca68b84fe3804e27f5b7ea5ab001005c708b7236a798c15b860d71cba9d21 \
+            bash -c 'set -e; mkdir /w; cp /in/Gemfile /in/Gemfile.lock /w/; cd /w
+              gem install bundler:2.6.9 --no-document > /dev/null
+              bundle _2.6.9_ lock > /dev/null
+              cat Gemfile.lock' \
+            | head -c 1048576 > "$RUNNER_TEMP/out/Gemfile.lock"
+          [ -s "$RUNNER_TEMP/out/Gemfile.lock" ] || { echo "::error::bundle lock produced no lock"; exit 1; }
+
+      - name: Upload the lock
+        if: steps.pin.outputs.changed == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ inputs.target }}-bump-lock
+          path: ${{ runner.temp }}/out/Gemfile.lock
+          retention-days: 5
+          if-no-files-found: error
+          overwrite: true
+
+  bump:
+    name: Check, open PR, build, merge
+    needs: lock
+    if: needs.lock.outputs.changed == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TARGET: ${{ inputs.target }}
+      BOT: bot/${{ inputs.target }}-bump
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+
+      - name: Download the lock
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ inputs.target }}-bump-lock
+          path: ${{ runner.temp }}/artifact
+
+      - name: Fetch the pinned repository's history (git data only, nothing runs)
+        id: src
+        run: |
+          set -euo pipefail
+          case $TARGET in
+            gem) remote=https://github.com/vocdoni/decidim-secure_elections.git branch=main
+                 slug=vocdoni/decidim-secure_elections what=decidim-elections-vocdoni ;;
+            decidim) remote=https://github.com/vocdoni/decidim.git branch=develop
+                     slug=vocdoni/decidim what="vocdoni/decidim develop" ;;
+            *) echo "::error::unknown target $TARGET"; exit 1 ;;
+          esac
+          head=$(git ls-remote "$remote" "refs/heads/$branch" | cut -f1)
+          [[ "$head" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::ls-remote returned no commit"; exit 1; }
+          pinned=$(awk -v r="  remote: $remote" '$0 == r { f = 1 } f && $1 == "revision:" { print $2; exit }' railway/Gemfile.lock)
+          [[ "$pinned" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::cannot read the pinned revision"; exit 1; }
+          src=$RUNNER_TEMP/src
+          git init -q "$src"
+          git -C "$src" fetch -q --filter=blob:none "$remote" "$branch"
+          if [ "$TARGET" = gem ]; then
+            git -C "$src" ls-tree --name-only "$head" db/migrate/ | sed 's|.*/||' > "$RUNNER_TEMP/migrations.txt"
+          else
+            # Every Decidim engine in the lock: its directory has the gem's name.
+            engines=$(awk -v r="  remote: $remote" '
+              /^GIT$/ { b = 0 } $0 == r { b = 1 } /^$/ { b = 0 }
+              b && /^    decidim-[a-z_]+ \(/ { print $1 }' railway/Gemfile.lock | sort -u)
+            [ -n "$engines" ] || { echo "::error::no Decidim engines in the lock"; exit 1; }
+            paths=()
+            while IFS= read -r e; do paths+=("$e/db/migrate/"); done <<<"$engines"
+            git -C "$src" ls-tree -r --name-only "$head" -- "${paths[@]}" \
+              | sed 's|.*/||' > "$RUNNER_TEMP/migrations.txt"
+            if ! git -C "$src" diff --name-only "$pinned" "$head" -- 'packages/*/package.json' > "$RUNNER_TEMP/packages.txt"; then
+              echo "history between $pinned and $head is not available" > "$RUNNER_TEMP/packages.txt"
+            fi
+          fi
+          {
+            echo "remote=$remote"
+            echo "slug=$slug"
+            echo "what=$what"
+            echo "head=$head"
+            echo "pinned=$pinned"
+            echo "short=${head:0:7}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Mechanical-bump check
+        id: check
+        env:
+          REMOTE: ${{ steps.src.outputs.remote }}
+          HEAD_SHA: ${{ steps.src.outputs.head }}
+          PINNED: ${{ steps.src.outputs.pinned }}
+        run: |
+          set -uo pipefail
+          # main got this revision some other way since the lock job read it.
+          if [ "$HEAD_SHA" = "$PINNED" ]; then
+            echo "::notice::main already pins $HEAD_SHA"
+            echo "stale=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          pkgs=()
+          [ "$TARGET" = decidim ] && pkgs=("$RUNNER_TEMP/packages.txt")
+          code=0
+          bash ci/pin-bump-check.sh railway/Gemfile.lock "$RUNNER_TEMP/artifact/Gemfile.lock" "$REMOTE" \
+            "$HEAD_SHA" railway/db/migrate "$RUNNER_TEMP/migrations.txt" "${pkgs[@]}" > "$RUNNER_TEMP/check.txt" || code=$?
+          cat "$RUNNER_TEMP/check.txt"
+          case $code in
+            0) echo "mechanical=true" >> "$GITHUB_OUTPUT" ;;
+            1) echo "mechanical=false" >> "$GITHUB_OUTPUT" ;;
+            *) echo "::error::pin-bump-check.sh failed (exit $code)"; exit 1 ;;
+          esac
+          # The branch moved after the lock job read it: the next scheduled run
+          # bumps to the new head.
+          if [ "$code" = 1 ] && ! grep -q "revision: $HEAD_SHA\$" "$RUNNER_TEMP/artifact/Gemfile.lock"; then
+            echo "stale=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Stop on a stale lock
+        if: steps.check.outputs.stale == 'true'
+        run: echo "::notice::nothing to merge from this run; the next scheduled run bumps to the new head"
+
+      - name: Commit to the bot branch and open or update the PR
+        if: steps.check.outputs.stale != 'true'
+        id: pr
+        env:
+          HEAD_SHA: ${{ steps.src.outputs.head }}
+          PINNED: ${{ steps.src.outputs.pinned }}
+          SHORT: ${{ steps.src.outputs.short }}
+          SLUG: ${{ steps.src.outputs.slug }}
+          WHAT: ${{ steps.src.outputs.what }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -q -B "$BOT"
+          cp "$RUNNER_TEMP/artifact/Gemfile.lock" railway/Gemfile.lock
+          git commit -q -m "chore: pin $WHAT to $SHORT" -- railway/Gemfile.lock
+          git push -q --force origin "$BOT"
+          echo "head=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+          # Commit subjects go inside a code block, without backticks: no
+          # mentions, issue links or cross-references are created anywhere.
+          body=$RUNNER_TEMP/body.md
+          {
+            echo "Pins $WHAT to $SLUG@$HEAD_SHA (was $SLUG@$PINNED)."
+            echo
+            echo "First-parent commits:"
+            echo
+            echo '```text'
+            { git -C "$RUNNER_TEMP/src" log --first-parent --format='%h %s' "$PINNED..$HEAD_SHA" \
+                || echo "(history between the two revisions is not available)"; } | tr -d '`' | head -n 200
+            echo '```'
+            echo
+            echo "Opened by the Pin bump workflow: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          } > "$body"
+
+          title="Pin $WHAT to $SHORT"
+          pr=$(gh pr list --head "$BOT" --base main --state open --json number --jq '.[0].number // empty')
+          if [ -n "$pr" ]; then
+            gh pr edit "$pr" --title "$title" --body-file "$body"
+          else
+            gh pr create --base main --head "$BOT" --title "$title" --body-file "$body" --label dependencies
+            pr=$(gh pr list --head "$BOT" --base main --state open --json number --jq '.[0].number')
+          fi
+          echo "number=$pr" >> "$GITHUB_OUTPUT"
+
+      - name: Not mechanical, leave the PR for review
+        if: steps.check.outputs.stale != 'true' && steps.check.outputs.mechanical == 'false'
+        env:
+          PR: ${{ steps.pr.outputs.number }}
+        run: |
+          set -euo pipefail
+          {
+            echo "Not merged automatically: this bump needs a review."
+            echo
+            sed 's/^/- /' "$RUNNER_TEMP/check.txt"
+            echo
+            echo "Finish it by pushing to \`$BOT\` (see railway/README.md, \"Bumping Decidim or the module\")."
+            echo "Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          } > "$RUNNER_TEMP/comment.md"
+          gh pr edit "$PR" --add-label needs-review
+          gh pr comment "$PR" --body-file "$RUNNER_TEMP/comment.md"
+
+      - name: Build the bump branch (no push)
+        if: steps.check.outputs.stale != 'true' && steps.check.outputs.mechanical == 'true'
+        id: build
+        env:
+          HEAD: ${{ steps.pr.outputs.head }}
+        run: |
+          set -euo pipefail
+          gh workflow run image.yml --ref "$BOT" -f push=false
+          run_id=
+          for _ in $(seq 1 24); do
+            sleep 5
+            run_id=$(gh run list --workflow image.yml --branch "$BOT" --event workflow_dispatch \
+              --limit 20 --json databaseId,headSha \
+              --jq "map(select(.headSha == \"$HEAD\")) | .[0].databaseId // empty")
+            [ -n "$run_id" ] && break
+          done
+          [ -n "$run_id" ] || { echo "::error::the dispatched image build did not show up"; exit 1; }
+          echo "run_url=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$run_id" >> "$GITHUB_OUTPUT"
+          if gh run watch "$run_id" --exit-status --interval 30 > /dev/null; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build failed, leave the PR for review
+        if: steps.build.outputs.ok == 'false'
+        env:
+          PR: ${{ steps.pr.outputs.number }}
+          RUN_URL: ${{ steps.build.outputs.run_url }}
+        run: |
+          set -euo pipefail
+          printf 'Not merged automatically: the image build failed.\n\nBuild: %s\n' "$RUN_URL" > "$RUNNER_TEMP/comment.md"
+          gh pr edit "$PR" --add-label needs-review
+          gh pr comment "$PR" --body-file "$RUNNER_TEMP/comment.md"
+          echo "::error::image build failed: $RUN_URL"
+          exit 1
+
+      - name: Merge and build main
+        if: steps.build.outputs.ok == 'true'
+        env:
+          PR: ${{ steps.pr.outputs.number }}
+          HEAD: ${{ steps.pr.outputs.head }}
+        run: |
+          set -euo pipefail
+          gh pr edit "$PR" --remove-label needs-review || true
+          gh pr merge "$PR" --merge --match-head-commit "$HEAD"
+          # Merges made with GITHUB_TOKEN do not fire `push`.
+          gh workflow run image.yml --ref main -f push=true

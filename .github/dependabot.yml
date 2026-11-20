@@ -1,0 +1,27 @@
+version: 2
+updates:
+  # Security updates only (limit 0 turns version updates off). Decidim's own
+  # packages are file: links into the pinned checkout, so most of the tree moves
+  # with the Decidim pin, not here.
+  - package-ecosystem: "npm"
+    directory: "/railway"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 0
+    ignore:
+      # monaco-editor (through graphiql in @decidim/core) pins dompurify exactly;
+      # npm overrides do not reach through file: links, so no update can apply.
+      # Decidim upstream ships the same version.
+      - dependency-name: "dompurify"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 1
+    labels:
+      - "dependencies"
+    groups:
+      github-actions:
+        patterns:
+          - "*"

@@ -1,0 +1,44 @@
+# Keeps railway/Gemfile.lock on the heads of vocdoni/decidim-secure_elections
+# main and vocdoni/decidim develop, one target after the other (they edit the
+# same lock). Scheduled, so neither repository needs a token for this one;
+# also runs by hand from the Actions tab.
+name: Pin bump
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Which pin to move"
+        type: choice
+        options: [all, gem, decidim]
+        default: all
+
+permissions: {}
+
+concurrency:
+  group: pin-bump
+  cancel-in-progress: false
+
+jobs:
+  gem:
+    if: github.event_name == 'schedule' || inputs.target != 'decidim'
+    uses: ./.github/workflows/pin-bump-target.yml
+    with:
+      target: gem
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: write
+
+  decidim:
+    needs: gem
+    if: ${{ !cancelled() && (github.event_name == 'schedule' || inputs.target != 'gem') }}
+    uses: ./.github/workflows/pin-bump-target.yml
+    with:
+      target: decidim
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: write

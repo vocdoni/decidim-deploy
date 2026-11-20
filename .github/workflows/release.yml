@@ -1,12 +1,12 @@
 # Promotes the image dev ran to decidim.vocdoni.dev (Railway), after approval
-# (see deploy/docs/specs/2026-11-18-deploy-pipeline-design.md, "Workflow 3").
+# (see railway/README.md, "Releasing").
 # Triggered by publishing a release `prod-YYYY.MM.DD[.N]`, or for redeploys and
 # rollbacks by a dispatch on the tag itself:
-#   gh workflow run vocdoni_release.yml --ref prod-YYYY.MM.DD -f tag=prod-YYYY.MM.DD
+#   gh workflow run release.yml --ref prod-YYYY.MM.DD -f tag=prod-YYYY.MM.DD
 # Railway deploys need the repository variable RAILWAY_DEPLOY=true and the
 # `production` secret RAILWAY_TOKEN (a project token). Without the variable the
 # run checks the release and says how to apply it by hand (deploy-prod.sh).
-name: "[Vocdoni] Release to prod"
+name: Release to prod
 
 on:
   release:
@@ -69,14 +69,14 @@ jobs:
             || fail "tag must look like prod-YYYY.MM.DD or prod-YYYY.MM.DD.N"
           # The production environment only admits prod-* tag refs.
           if [ "$GITHUB_REF_TYPE" != tag ] || [ "$GITHUB_REF_NAME" != "$tag" ]; then
-            fail "run on the tag itself: gh workflow run vocdoni_release.yml --ref $tag -f tag=$tag"
+            fail "run on the tag itself: gh workflow run release.yml --ref $tag -f tag=$tag"
           fi
           commit=$(gh api "repos/$GITHUB_REPOSITORY/commits/$tag" --jq .sha)
           [[ "$commit" =~ ^[0-9a-f]{40}$ ]] || fail "cannot resolve $tag"
-          status=$(gh api "repos/$GITHUB_REPOSITORY/compare/$commit...develop" --jq .status)
+          status=$(gh api "repos/$GITHUB_REPOSITORY/compare/$commit...main" --jq .status)
           case $status in
             ahead|identical) ;;
-            *) fail "release a commit that dev has built: $tag ($commit) is not on develop" ;;
+            *) fail "release a commit that dev has built: $tag ($commit) is not on main" ;;
           esac
           echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin > /dev/null
           ref="$IMAGE:sha-${commit:0:12}"
@@ -113,7 +113,7 @@ jobs:
           DIGEST: ${{ needs.resolve.outputs.digest }}
           GEM: ${{ needs.resolve.outputs.gem }}
         run: |
-          echo "::warning::no Railway deploy from CI (RAILWAY_DEPLOY is not true); apply with: deploy/railway/deploy-prod.sh $TAG"
+          echo "::warning::no Railway deploy from CI (RAILWAY_DEPLOY is not true); apply with: railway/deploy-prod.sh $TAG"
           {
             echo "### Release $TAG (apply by hand)"
             echo
@@ -121,8 +121,8 @@ jobs:
             echo "- Gem revision: \`$GEM\`"
             echo "- Image: \`$IMAGE@$DIGEST\`"
             echo
-            echo "Apply it from a checkout of the fork, with a logged-in \`railway\` CLI:"
-            echo "\`deploy/railway/deploy-prod.sh $TAG\`"
+            echo "Apply it from a checkout of this repository, with a logged-in \`railway\` CLI:"
+            echo "\`railway/deploy-prod.sh $TAG\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
   deploy:
@@ -169,7 +169,7 @@ jobs:
             echo "| service | source before | latest deployment before |"
             echo "|---|---|---|"
           } > "$RUNNER_TEMP/before.md"
-          SUMMARY_FILE=$RUNNER_TEMP/before.md bash deploy/ci/railway-promote.sh check "$IMAGE@$DIGEST"
+          SUMMARY_FILE=$RUNNER_TEMP/before.md bash ci/railway-promote.sh check "$IMAGE@$DIGEST"
 
       - name: Deploy web, worker and the crons
         env:
@@ -180,7 +180,7 @@ jobs:
             echo "| service | deployment | Railway image digest |"
             echo "|---|---|---|"
           } > "$RUNNER_TEMP/after.md"
-          SUMMARY_FILE=$RUNNER_TEMP/after.md bash deploy/ci/railway-promote.sh promote "$IMAGE@$DIGEST"
+          SUMMARY_FILE=$RUNNER_TEMP/after.md bash ci/railway-promote.sh promote "$IMAGE@$DIGEST"
 
       - name: Check decidim.vocdoni.dev
         run: |
@@ -207,7 +207,7 @@ jobs:
             echo "- Image: \`$IMAGE@$DIGEST\`"
             if [ -n "$PREVIOUS" ]; then
               echo "- Previous release (rollback target): \`$PREVIOUS\`, roll back with"
-              echo "  \`gh workflow run vocdoni_release.yml --ref $PREVIOUS -f tag=$PREVIOUS\`"
+              echo "  \`gh workflow run release.yml --ref $PREVIOUS -f tag=$PREVIOUS\`"
             else
               echo "- Previous release: none"
             fi

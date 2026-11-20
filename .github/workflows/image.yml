@@ -1,25 +1,26 @@
-# Builds the decidim.vocdoni.dev image from deploy/railway/ (see
-# deploy/docs/specs/2026-11-18-deploy-pipeline-design.md, "Workflow 1").
-# develop pushes publish ghcr.io/vocdoni/decidim-vocdoni:sha-<12> and :develop;
-# pull requests and workflow_dispatch with push=false only build.
-name: "[Vocdoni] Image"
+# Builds the decidim.vocdoni.dev image from railway/ (see railway/README.md,
+# "Deploying").
+# main pushes publish ghcr.io/vocdoni/decidim-vocdoni:sha-<12> and :develop (the
+# tag decidim-dev follows); pull requests and workflow_dispatch with push=false
+# only build.
+name: Image
 
 on:
   push:
-    branches: [develop]
+    branches: [main]
     paths:
-      - "deploy/railway/**"
-      - ".github/workflows/vocdoni_image.yml"
+      - "railway/**"
+      - ".github/workflows/image.yml"
   pull_request:
     paths:
-      - "deploy/railway/**"
-      - ".github/workflows/vocdoni_image.yml"
-  # Merges made with GITHUB_TOKEN (gem bumps) do not fire `push`; the gem bump
+      - "railway/**"
+      - ".github/workflows/image.yml"
+  # Merges made with GITHUB_TOKEN (pin bumps) do not fire `push`; the pin bump
   # workflow dispatches this one instead, with push=false on its PR branch.
   workflow_dispatch:
     inputs:
       push:
-        description: "Push sha-<12> and :develop (only honoured on develop)"
+        description: "Push sha-<12> and :develop (only honoured on main)"
         type: boolean
         default: true
 
@@ -29,7 +30,8 @@ permissions:
 
 concurrency:
   group: image-${{ github.ref }}
-  cancel-in-progress: true
+  # main builds all finish: each merge commit needs its sha-<12> for a release.
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 env:
   IMAGE: ghcr.io/vocdoni/decidim-vocdoni
@@ -51,18 +53,22 @@ jobs:
           PUSH_INPUT: ${{ inputs.push }}
         run: |
           set -euo pipefail
-          # Only develop moves :develop; any other ref is a check build.
+          # Only main moves :develop; any other ref is a check build.
           push=false
-          if [ "$GITHUB_REF" = refs/heads/develop ]; then
+          if [ "$GITHUB_REF" = refs/heads/main ]; then
             if [ "$EVENT" = push ] || { [ "$EVENT" = workflow_dispatch ] && [ "$PUSH_INPUT" = true ]; }; then
               push=true
             fi
           fi
-          gem_rev=$(awk '/decidim-secure_elections\.git/ { f = 1 } f && $1 == "revision:" { print $2; exit }' deploy/railway/Gemfile.lock)
-          if ! [[ "$gem_rev" =~ ^[0-9a-f]{40}$ ]]; then
-            echo "::error::cannot read the decidim-secure_elections revision from deploy/railway/Gemfile.lock"
-            exit 1
-          fi
+          rev() { awk -v r="  remote: https://github.com/vocdoni/$1.git" '$0 == r { f = 1 } f && $1 == "revision:" { print $2; exit }' railway/Gemfile.lock; }
+          gem_rev=$(rev decidim-secure_elections)
+          decidim_rev=$(rev decidim)
+          for v in "$gem_rev" "$decidim_rev"; do
+            if ! [[ "$v" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "::error::cannot read the pinned revisions from railway/Gemfile.lock"
+              exit 1
+            fi
+          done
           sha12=${GITHUB_SHA:0:12}
           {
             echo "push=$push"
@@ -75,6 +81,7 @@ jobs:
             echo "org.opencontainers.image.revision=$GITHUB_SHA"
             echo "org.opencontainers.image.source=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY"
             echo "io.vocdoni.gem-revision=$gem_rev"
+            echo "io.vocdoni.decidim-revision=$decidim_rev"
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
 
@@ -92,8 +99,8 @@ jobs:
         id: build
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
-          context: deploy/railway
-          file: deploy/railway/Dockerfile
+          context: railway
+          file: railway/Dockerfile
           platforms: linux/amd64
           push: ${{ steps.meta.outputs.push == 'true' }}
           tags: ${{ steps.meta.outputs.tags }}
