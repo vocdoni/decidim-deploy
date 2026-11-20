@@ -11,7 +11,7 @@ GIT
 
 GIT
   remote: https://github.com/vocdoni/decidim.git
-  revision: 5dfa5c67761b8a90b0d787d81bb0ab9e27e47502
+  revision: 48d0d94c9a5e7c4c41c83b12d89ce57fda030afe
   branch: develop
   specs:
     decidim (0.33.0.dev)
