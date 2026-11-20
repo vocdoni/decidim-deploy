@@ -1,17 +1,17 @@
 # decidim-dev.vocdoni.net (z4) in production mode
 
 The public dev instance runs the same image as Railway prod (decidim.vocdoni.dev):
-`ghcr.io/vocdoni/decidim-vocdoni`, built by GitHub Actions from `deploy/railway/` of
-`vocdoni/decidim` develop, in `RAILS_ENV=production` with dev variables. No
+`ghcr.io/vocdoni/decidim-vocdoni`, built by GitHub Actions from `railway/` of
+`vocdoni/decidim-deploy` main, in `RAILS_ENV=production` with dev variables. No
 letter_opener, web-console, `/rails/info` or error traces.
 
 The files in this directory are installed in `/home/vocdoni/decidim-prod-mode/` on
-z4 (see [Install](#install)); this copy in the fork is the reference.
+z4 (see [Install](#install)); this copy is the reference.
 
 | Piece | What |
 | ------- | ------ |
 | `compose.yaml` | project `decidim-dev-prod`: `web` (Puma, `127.0.0.1:3000`), `worker` (Sidekiq), `release` (one-shot `bin/release` = `db:migrate`) |
-| `dev.env` | all variables, secrets included (chmod 600, never print or copy; not in the fork) |
+| `dev.env` | all variables, secrets included (chmod 600, never print or copy; not in git) |
 | `.env` | `DECIDIM_IMAGE_TAG`, the running image `decidim-vocdoni-dev:<tag>`; written by the updater after a deploy passes its checks |
 | `decidim-dev-update` | the updater, installed as `/usr/local/bin/decidim-dev-update` |
 | `decidim-dev-update.service`, `.timer` | systemd units in `/etc/systemd/system/`; the timer runs the updater 2 minutes after the previous run ends |
@@ -31,7 +31,7 @@ Not ported from Railway: the cron services (Decidim's scheduled rake tasks).
 
 ## How a new image reaches dev
 
-A merge to fork `develop` that touches `deploy/railway/` makes the `[Vocdoni] Image`
+A merge to `main` that touches `railway/` makes the `Image`
 workflow push `ghcr.io/vocdoni/decidim-vocdoni:sha-<12>` and move `:develop`. Within
 2 minutes `decidim-dev-update`:
 
@@ -65,17 +65,16 @@ decidim-dev-update --force-fail              # exercise the rollback path
 
 ## Install
 
-One time, as `vocdoni` on z4, from a checkout of the fork at the merged commit
-(`/home/vocdoni/decidim` has the `vocdoni-fork` remote):
+One time, as `vocdoni` on z4, from `vocdoni/decidim-deploy` main:
 
 ```bash
-cd /home/vocdoni/decidim && git fetch vocdoni-fork
-src=$(mktemp -d) && git archive vocdoni-fork/develop deploy/dev | tar -x -C "$src"
+src=$(mktemp -d) && curl -fsSL https://github.com/vocdoni/decidim-deploy/archive/refs/heads/main.tar.gz \
+  | tar -xz -C "$src" --strip-components=1 decidim-deploy-main/dev
 cd /home/vocdoni/decidim-prod-mode
-install -m 0644 "$src/deploy/dev/compose.yaml" "$src/deploy/dev/README.md" .
-install -m 0755 "$src/deploy/dev/checks.sh" .
-sudo install -m 0755 "$src/deploy/dev/decidim-dev-update" /usr/local/bin/decidim-dev-update
-sudo install -m 0644 "$src/deploy/dev/decidim-dev-update.service" "$src/deploy/dev/decidim-dev-update.timer" /etc/systemd/system/
+install -m 0644 "$src/dev/compose.yaml" "$src/dev/README.md" .
+install -m 0755 "$src/dev/checks.sh" .
+sudo install -m 0755 "$src/dev/decidim-dev-update" /usr/local/bin/decidim-dev-update
+sudo install -m 0644 "$src/dev/decidim-dev-update.service" "$src/dev/decidim-dev-update.timer" /etc/systemd/system/
 sudo systemctl daemon-reload
 decidim-dev-update --record-baseline   # applied versions with no file in the running image
 ```
@@ -114,17 +113,17 @@ To go back to the CI image: `sudo systemctl start decidim-dev-update.timer`.
 
 ### A z4 build
 
-For a change not yet on fork develop (for example a gem SHA under test), build on
+For a change not yet on `main` (for example a gem SHA under test), build on
 z4 and deploy it as above:
 
 ```bash
 cd /home/vocdoni/decidim-prod-mode
-git -C /home/vocdoni/decidim fetch vocdoni-fork
-rm -rf app && mkdir app && git -C /home/vocdoni/decidim archive vocdoni-fork/develop:deploy/railway | tar -x -C app
+rm -rf app && mkdir app && curl -fsSL https://github.com/vocdoni/decidim-deploy/archive/refs/heads/main.tar.gz \
+  | tar -xz -C app --strip-components=2 decidim-deploy-main/railway
 # optional gem bump: edit the decidim-secure_elections `revision:` in app/Gemfile.lock, then
 docker run --rm -u 1000 -v $PWD/app:/w -w /w -e HOME=/tmp -e BUNDLE_DEPLOYMENT=0 -e BUNDLE_FROZEN=0 -e BUNDLE_PATH=/tmp/b \
   decidim-vocdoni-dev:$(sed -n s/^DECIDIM_IMAGE_TAG=//p .env) bundle lock
-TAG=$(git -C /home/vocdoni/decidim rev-parse --short=7 vocdoni-fork/develop)
+TAG=local-$(date -u +%Y%m%d%H%M)
 docker build -t decidim-vocdoni-dev:$TAG app > build-$TAG.log 2>&1   # ~5 min on z4
 ```
 
@@ -134,7 +133,7 @@ If the gem adds migrations, copy them into `app/db/migrate/` first
 ## Migration versions
 
 The DB was built by `development_app/`, whose migration files carry different
-timestamps than `deploy/railway/db/migrate/`. Every migration of the image was
+timestamps than `railway/db/migrate/`. Every migration of the image was
 matched by name to an applied dev migration and its version inserted into
 `schema_migrations`, so `db:migrate:status` shows all `up`. The dev-app versions
 stay in `schema_migrations` and show as `NO FILE`; `.update/nofile-baseline` lists

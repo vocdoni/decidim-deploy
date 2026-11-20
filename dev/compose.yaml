@@ -1,5 +1,5 @@
-# decidim-dev.vocdoni.net on z4: the Railway production image (deploy/railway
-# of vocdoni/decidim develop) in RAILS_ENV=production, with dev env vars.
+# decidim-dev.vocdoni.net on z4: the Railway production image (railway/ of
+# vocdoni/decidim-deploy main) in RAILS_ENV=production, with dev env vars.
 # The image is ghcr.io/vocdoni/decidim-vocdoni tagged locally by
 # decidim-dev-update as decidim-vocdoni-dev:sha-<12>, or a manual z4 build.
 # Postgres and Redis are the devcontainer's (project "decidim"), reached over

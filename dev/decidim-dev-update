@@ -109,7 +109,7 @@ prev_tag=$(current_tag)
 docker image inspect "$LOCAL_REPO:$prev_tag" > /dev/null 2>&1 || die "previous image $LOCAL_REPO:$prev_tag is missing"
 log "$IMAGE:$ref is $remote; dev runs $LOCAL_REPO:$prev_tag"
 
-# 2. Pull by digest and tag with the fork commit.
+# 2. Pull by digest and tag with the image commit.
 docker pull -q "$IMAGE@$remote" > /dev/null || die "pull of $IMAGE@$remote failed"
 rev=$(docker image inspect -f '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$IMAGE@$remote")
 [[ "$rev" =~ ^[0-9a-f]{40}$ ]] || fail_digest "image $remote has no org.opencontainers.image.revision label"
@@ -121,7 +121,7 @@ if old_id=$(docker image inspect -f '{{.Id}}' "$LOCAL_REPO:$new_tag" 2> /dev/nul
 fi
 docker tag "$IMAGE@$remote" "$LOCAL_REPO:$new_tag"
 printf 'prev_tag=%s\nnew_tag=%s\ndigest=%s\nstarted=%s\n' "$prev_tag" "$new_tag" "$remote" "$(date -u +%FT%TZ)" > "$STATE"
-log "tagged $LOCAL_REPO:$new_tag (fork $rev)"
+log "tagged $LOCAL_REPO:$new_tag (commit $rev)"
 
 # 3. Migration guard. Base name = file name without timestamp, engine suffix, .rb.
 [ -f "$BASELINE" ] || die "no $BASELINE; run decidim-dev-update --record-baseline once"
